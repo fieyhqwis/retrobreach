@@ -1,6 +1,3 @@
---====================================================================================--
--- ULTIMATE SCP UTILITY V8.6 [DYNAMIC ESP (BYPASS LIMIT), 3 ALLIANCES, GOC VS ALL]
---====================================================================================--
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
