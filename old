@@ -1,0 +1,670 @@
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local Teams = game:GetService("Teams")
+local TweenService = game:GetService("TweenService")
+local Camera = workspace.CurrentCamera
+
+local localPlayer = Players.LocalPlayer
+local coreGui = game:GetService("CoreGui")
+
+local targetGuiParent = pcall(function() return coreGui.Name end) and coreGui or localPlayer:WaitForChild("PlayerGui")
+
+local originalLightingData = {
+    Brightness = Lighting.Brightness,
+    ClockTime = Lighting.ClockTime,
+    FogEnd = Lighting.FogEnd,
+    GlobalShadows = Lighting.GlobalShadows,
+    AtmosphereDensity = 0
+}
+
+for _, v in pairs(Lighting:GetChildren()) do
+    if v:IsA("Atmosphere") then
+        originalLightingData.AtmosphereDensity = v.Density
+    end
+end
+
+-- Configuration
+local cfg = {
+    aimbot = { 
+        active = false,
+        mode = "Legit", 
+        bind = Enum.KeyCode.H, 
+        activation = Enum.UserInputType.MouseButton2, 
+        teamCheck = true,
+        wallCheck = true,
+        targetPart = "Head",
+        smoothing = 0.2, 
+        fovRadius = 150,
+        showFov = true
+    },
+    esp = { 
+        enabled = true,
+        maxHighlights = 25 -- Лимит подсветки для обхода бага движка
+    },
+    maskEsp = { enabled = true },
+    teamStats = { enabled = true }, 
+    lighting = { fullbright = false, noFog = false },
+    ui = { 
+        theme = Color3.fromRGB(0, 255, 150),
+        bg = Color3.fromRGB(15, 15, 18),
+        elementBg = Color3.fromRGB(25, 25, 30),
+        openKey = Enum.KeyCode.RightShift 
+    },
+    whitelist = {"2008Talanted"}
+}
+
+-- Логика Фракций (3 Альянса + GOC против всех)
+local function GetFaction(player)
+    if not player or not player.Team then return -1 end
+    local t = player.Team.Name:lower()
+    
+    if t:find("cd") or t:find("class d") or t:find("ci") or t:find("chaos") then
+        return 1 
+    elseif t:find("fp") or t:find("facility") or t:find("scientist") or t:find("sd") or t:find("security") or t:find("mtf") or t:find("mobile task") or t:find("nine") then
+        return 2 
+    elseif t:find("scp") or t:find("sh") or t:find("serpent") then
+        return 3 
+    elseif t:find("goc") or t:find("global") then
+        return 4 
+    end
+    return -1 
+end
+
+local function IsEnemy(p1, p2)
+    if not cfg.aimbot.teamCheck then return true end
+    local f1 = GetFaction(p1)
+    local f2 = GetFaction(p2)
+    if f1 == -1 or f2 == -1 then return false end
+    return f1 ~= f2 
+end
+
+local function GetPlayerRole(player)
+    local roleObj = player:FindFirstChild("Role")
+    if roleObj and roleObj:IsA("StringValue") then
+        return roleObj.Value
+    end
+    local attrRole = player:GetAttribute("Role")
+    if attrRole then return tostring(attrRole) end
+    return "SCP"
+end
+
+local TeleportLocations = {
+    {"D Spawn", Vector3.new(1125, 61, 288)},
+    {"LCZ Armory", Vector3.new(850, 49, 595)},
+    {"LCZ 914", Vector3.new(914, 49, 584)},
+    {"SCP 294", Vector3.new(1299, 37, 458)},
+    {"Gate A Bottom", Vector3.new(1462, 49, 404)},
+    {"Gate B Bottom", Vector3.new(1211, 49, 103)},
+    {"Gate A Surface", Vector3.new(1487, 586, 403)},
+    {"Gate B Surface", Vector3.new(1482, 586, 404)},
+    {"Medical", Vector3.new(1310, 49, 262)},
+    {"Armory", Vector3.new(1247, 37, 285)},
+    {"Outside Armory", Vector3.new(1224, 576, 211)},
+    {"Storage", Vector3.new(1547, 586, 172)},
+    {"Escape", Vector3.new(1117, 566, 58)},
+    {"CI Spawn", Vector3.new(1597, 565, 408)},
+    {"Warhead", Vector3.new(1562, 566, 328)}
+}
+
+local isHoldingAim = false
+local currentTarget = nil
+local menuVisible = false
+local waitingForKey = false
+
+local function isWhitelisted(player)
+    if not player then return false end
+    local name = player.Name:lower()
+    local display = player.DisplayName:lower()
+    for _, partial in pairs(cfg.whitelist) do
+        local p = partial:lower()
+        if name:find(p) or display:find(p) then return true end
+    end
+    return false
+end
+
+local function isAlive(p)
+    return p and p.Character and p.Character:FindFirstChild("Humanoid") and p.Character.Humanoid.Health > 0
+end
+
+local function getTargetVisibility(part)
+    if not cfg.aimbot.wallCheck then return true end
+    local char = localPlayer.Character
+    if not char then return false end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {char, Camera}
+    local ray = workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, params)
+    return ray == nil or ray.Instance:IsDescendantOf(part.Parent)
+end
+
+local function TeleportTo(pos)
+    local char = localPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        char:PivotTo(CFrame.new(pos + Vector3.new(0, 3, 0)))
+    end
+end
+
+if targetGuiParent:FindFirstChild("EliteInternal_v8") then
+    targetGuiParent.EliteInternal_v8:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "EliteInternal_v8"
+ScreenGui.Parent = targetGuiParent
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+
+local FovFrame = Instance.new("Frame", ScreenGui)
+FovFrame.BackgroundTransparency = 1
+FovFrame.Visible = cfg.aimbot.showFov
+local FovCorner = Instance.new("UICorner", FovFrame)
+FovCorner.CornerRadius = UDim.new(1, 0)
+local FovStroke = Instance.new("UIStroke", FovFrame)
+FovStroke.Color = Color3.new(1, 1, 1)
+FovStroke.Thickness = 1
+FovStroke.Transparency = 0.5
+
+local WMFrame = Instance.new("Frame", ScreenGui)
+WMFrame.Size = UDim2.new(0, 250, 0, 500)
+WMFrame.Position = UDim2.new(1, -260, 0, 15)
+WMFrame.BackgroundTransparency = 1
+local WMList = Instance.new("UIListLayout", WMFrame)
+WMList.HorizontalAlignment = "Right"
+WMList.Padding = UDim.new(0, 8)
+
+local function AddWM()
+    local container = Instance.new("Frame", WMFrame)
+    container.Size = UDim2.new(1, 0, 0, 28)
+    container.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+    container.BackgroundTransparency = 0.4
+    Instance.new("UICorner", container).CornerRadius = UDim.new(0, 6)
+    local stroke = Instance.new("UIStroke", container)
+    stroke.Color = cfg.ui.theme
+    stroke.Transparency = 0.5
+    local l = Instance.new("TextLabel", container)
+    l.Size = UDim2.new(1, -15, 1, 0)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.new(1, 1, 1)
+    l.Font = Enum.Font.GothamSemibold
+    l.TextSize = 13
+    l.TextXAlignment = Enum.TextXAlignment.Right
+    return container, l
+end
+
+local contAim, lblAim = AddWM()
+local contESP, lblESP = AddWM()
+local contMask, lblMask = AddWM()
+local contTeams, lblTeams = AddWM()
+
+contTeams.Size = UDim2.new(1, 0, 0, 200)
+lblTeams.Size = UDim2.new(1, -15, 1, -10)
+lblTeams.Position = UDim2.new(0, 0, 0, 5)
+lblTeams.TextYAlignment = Enum.TextYAlignment.Top
+lblTeams.RichText = true
+
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 380, 0, 560)
+MainFrame.Position = UDim2.new(0.5, -190, 0.5, -280)
+MainFrame.BackgroundColor3 = cfg.ui.bg
+MainFrame.Visible = false
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = cfg.ui.theme
+MainStroke.Thickness = 2
+
+local dragToggle, dragStart, startPos
+MainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then 
+        dragToggle = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragToggle = false end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragToggle and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+local TitleBar = Instance.new("TextLabel", MainFrame)
+TitleBar.Size = UDim2.new(1, -15, 0, 40)
+TitleBar.Position = UDim2.new(0, 15, 0, 0)
+TitleBar.BackgroundTransparency = 1
+TitleBar.Text = "ELITE UTILITY V8.6"
+TitleBar.TextColor3 = cfg.ui.theme
+TitleBar.Font = Enum.Font.GothamBold
+TitleBar.TextSize = 18
+TitleBar.TextXAlignment = Enum.TextXAlignment.Left
+
+local TabBar = Instance.new("Frame", MainFrame)
+TabBar.Size = UDim2.new(1, -20, 0, 35)
+TabBar.Position = UDim2.new(0, 10, 0, 45)
+TabBar.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+Instance.new("UICorner", TabBar).CornerRadius = UDim.new(0, 6)
+
+local function CreateTabBtn(text, sizeScale, posScale)
+    local b = Instance.new("TextButton", TabBar)
+    b.Size = UDim2.new(sizeScale, 0, 1, 0)
+    b.Position = UDim2.new(posScale, 0, 0, 0)
+    b.BackgroundTransparency = 1
+    b.Text = text
+    b.Font = Enum.Font.GothamBold
+    b.TextColor3 = Color3.new(0.6, 0.6, 0.6)
+    b.TextSize = 12
+    return b
+end
+
+local MainTabBtn = CreateTabBtn("MAIN", 0.33, 0)
+local TPTabBtn = CreateTabBtn("TELEPORTS", 0.34, 0.33)
+local WLTabBtn = CreateTabBtn("WHITELIST", 0.33, 0.67)
+MainTabBtn.TextColor3 = Color3.new(1, 1, 1)
+
+local function SetupScroll()
+    local scroll = Instance.new("ScrollingFrame", MainFrame)
+    scroll.Size = UDim2.new(1, -20, 1, -100)
+    scroll.Position = UDim2.new(0, 10, 0, 90)
+    scroll.BackgroundTransparency = 1
+    scroll.ScrollBarThickness = 3
+    scroll.BorderSizePixel = 0
+    local list = Instance.new("UIListLayout", scroll)
+    list.Padding = UDim.new(0, 8)
+    return scroll
+end
+
+local MainScroll = SetupScroll()
+local TPScroll = SetupScroll(); TPScroll.Visible = false
+local WLScroll = SetupScroll(); WLScroll.Visible = false
+
+local function SwitchTab(activeBtn, activeScroll)
+    MainScroll.Visible = false; TPScroll.Visible = false; WLScroll.Visible = false
+    MainTabBtn.TextColor3 = Color3.new(0.6,0.6,0.6); TPTabBtn.TextColor3 = Color3.new(0.6,0.6,0.6); WLTabBtn.TextColor3 = Color3.new(0.6,0.6,0.6)
+    activeBtn.TextColor3 = Color3.new(1,1,1)
+    activeScroll.Visible = true
+end
+MainTabBtn.MouseButton1Click:Connect(function() SwitchTab(MainTabBtn, MainScroll) end)
+TPTabBtn.MouseButton1Click:Connect(function() SwitchTab(TPTabBtn, TPScroll) end)
+WLTabBtn.MouseButton1Click:Connect(function() SwitchTab(WLTabBtn, WLScroll) end)
+
+local function NewToggle(text, start, callback)
+    local b = Instance.new("TextButton", MainScroll)
+    b.Size = UDim2.new(1, -10, 0, 35)
+    b.BackgroundColor3 = cfg.ui.elementBg
+    b.Text = "  " .. text
+    b.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+    b.Font = Enum.Font.GothamSemibold
+    b.TextSize = 14
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    local status = Instance.new("TextLabel", b)
+    status.Size = UDim2.new(0, 50, 1, 0)
+    status.Position = UDim2.new(1, -60, 0, 0)
+    status.BackgroundTransparency = 1
+    status.Text = start and "ON" or "OFF"
+    status.TextColor3 = start and cfg.ui.theme or Color3.fromRGB(200, 50, 50)
+    status.Font = Enum.Font.GothamBold
+    status.TextSize = 14
+    status.TextXAlignment = Enum.TextXAlignment.Right
+    b.MouseButton1Click:Connect(function()
+        start = not start
+        status.Text = start and "ON" or "OFF"
+        status.TextColor3 = start and cfg.ui.theme or Color3.fromRGB(200, 50, 50)
+        callback(start)
+    end)
+end
+
+local ModeBtn = Instance.new("TextButton", MainScroll)
+ModeBtn.Size = UDim2.new(1, -10, 0, 35)
+ModeBtn.BackgroundColor3 = Color3.fromRGB(60, 40, 80)
+ModeBtn.Text = "  AIMBOT MODE: " .. cfg.aimbot.mode:upper()
+ModeBtn.TextColor3 = Color3.new(1, 1, 1)
+ModeBtn.Font = Enum.Font.GothamBold
+ModeBtn.TextSize = 14
+ModeBtn.TextXAlignment = Enum.TextXAlignment.Left
+Instance.new("UICorner", ModeBtn).CornerRadius = UDim.new(0, 6)
+
+ModeBtn.MouseButton1Click:Connect(function()
+    cfg.aimbot.mode = (cfg.aimbot.mode == "Legit") and "Rage" or "Legit"
+    ModeBtn.BackgroundColor3 = (cfg.aimbot.mode == "Legit") and Color3.fromRGB(60, 40, 80) or Color3.fromRGB(150, 30, 30)
+    ModeBtn.Text = "  AIMBOT MODE: " .. cfg.aimbot.mode:upper()
+end)
+
+local BindBtn = Instance.new("TextButton", MainScroll)
+BindBtn.Size = UDim2.new(1, -10, 0, 35)
+BindBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+BindBtn.Text = "  AIM KEY: [" .. cfg.aimbot.bind.Name .. "]"
+BindBtn.TextColor3 = Color3.new(1, 1, 1)
+BindBtn.Font = Enum.Font.GothamBold
+BindBtn.TextSize = 14
+BindBtn.TextXAlignment = Enum.TextXAlignment.Left
+Instance.new("UICorner", BindBtn).CornerRadius = UDim.new(0, 6)
+
+BindBtn.MouseButton1Click:Connect(function()
+    waitingForKey = true
+    BindBtn.Text = "  PRESS ANY KEY..."
+    BindBtn.TextColor3 = cfg.ui.theme
+end)
+
+local FovControlFrame = Instance.new("Frame", MainScroll)
+FovControlFrame.Size = UDim2.new(1, -10, 0, 35)
+FovControlFrame.BackgroundTransparency = 1
+local FovLabel = Instance.new("TextLabel", FovControlFrame)
+FovLabel.Size = UDim2.new(0.6, 0, 1, 0)
+FovLabel.BackgroundColor3 = cfg.ui.elementBg
+FovLabel.Text = "  FOV Radius: " .. cfg.aimbot.fovRadius
+FovLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+FovLabel.Font = Enum.Font.GothamSemibold
+FovLabel.TextSize = 14
+FovLabel.TextXAlignment = Enum.TextXAlignment.Left
+Instance.new("UICorner", FovLabel).CornerRadius = UDim.new(0, 6)
+
+local function createFovBtn(text, pos, change)
+    local btn = Instance.new("TextButton", FovControlFrame)
+    btn.Size = UDim2.new(0.18, 0, 1, 0)
+    btn.Position = pos
+    btn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 16
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    btn.MouseButton1Click:Connect(function()
+        cfg.aimbot.fovRadius = math.clamp(cfg.aimbot.fovRadius + change, 10, 1000)
+        FovLabel.Text = "  FOV Radius: " .. cfg.aimbot.fovRadius
+    end)
+end
+createFovBtn("-", UDim2.new(0.62, 0, 0, 0), -10)
+createFovBtn("+", UDim2.new(0.82, 0, 0, 0), 10)
+
+NewToggle("Aimbot Master", cfg.aimbot.active, function(v) cfg.aimbot.active = v end)
+NewToggle("Show FOV Circle", cfg.aimbot.showFov, function(v) cfg.aimbot.showFov = v; FovFrame.Visible = v end)
+NewToggle("Wall Check", cfg.aimbot.wallCheck, function(v) cfg.aimbot.wallCheck = v end)
+NewToggle("FACTION Team Check", cfg.aimbot.teamCheck, function(v) cfg.aimbot.teamCheck = v end)
+NewToggle("ESP Global", cfg.esp.enabled, function(v) cfg.esp.enabled = v end)
+NewToggle("Fullbright", cfg.lighting.fullbright, function(v) cfg.lighting.fullbright = v end)
+NewToggle("No Fog", cfg.lighting.noFog, function(v) cfg.lighting.noFog = v end)
+
+local function CreateTPBtn(name, callback, color)
+    local btn = Instance.new("TextButton", TPScroll)
+    btn.Size = UDim2.new(1, -10, 0, 35)
+    btn.BackgroundColor3 = color or Color3.fromRGB(35, 40, 45)
+    btn.Text = "  TP: " .. name
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 14
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    btn.MouseButton1Click:Connect(callback)
+end
+
+CreateTPBtn("DROPPED MASK (SCP-035)", function()
+    local mask = workspace:FindFirstChild("SCP035_DroppedMask", true)
+    if mask then
+        if mask:IsA("Model") and mask.PrimaryPart then
+            TeleportTo(mask:GetPivot().Position)
+        elseif mask:IsA("BasePart") then
+            TeleportTo(mask.Position)
+        end
+    end
+end, Color3.fromRGB(80, 50, 30))
+
+for _, loc in ipairs(TeleportLocations) do
+    CreateTPBtn(loc[1], function() TeleportTo(loc[2]) end)
+end
+
+local WLInput = Instance.new("TextBox", WLScroll)
+WLInput.Size = UDim2.new(1, -10, 0, 35)
+WLInput.PlaceholderText = "Enter part of name..."
+WLInput.BackgroundColor3 = cfg.ui.elementBg
+WLInput.TextColor3 = Color3.new(1, 1, 1)
+WLInput.Font = Enum.Font.Gotham
+WLInput.TextSize = 14
+Instance.new("UICorner", WLInput).CornerRadius = UDim.new(0, 6)
+local WLAdd = Instance.new("TextButton", WLScroll)
+WLAdd.Size = UDim2.new(1, -10, 0, 35)
+WLAdd.BackgroundColor3 = cfg.ui.theme
+WLAdd.Text = "ADD TO WHITELIST"
+WLAdd.TextColor3 = Color3.fromRGB(10, 10, 10)
+WLAdd.Font = Enum.Font.GothamBold
+WLAdd.TextSize = 14
+Instance.new("UICorner", WLAdd).CornerRadius = UDim.new(0, 6)
+
+local function UpdateWLVisuals()
+    for _, v in pairs(WLScroll:GetChildren()) do 
+        if v:IsA("TextButton") and v ~= WLAdd then v:Destroy() end 
+    end
+    for i, val in pairs(cfg.whitelist) do
+        local b = Instance.new("TextButton", WLScroll)
+        b.Size = UDim2.new(1, -10, 0, 30)
+        b.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        b.Text = "REMOVE: " .. val
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Font = Enum.Font.GothamSemibold
+        b.TextSize = 13
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+        b.MouseButton1Click:Connect(function() table.remove(cfg.whitelist, i); UpdateWLVisuals() end)
+    end
+end
+WLAdd.MouseButton1Click:Connect(function()
+    if WLInput.Text ~= "" then table.insert(cfg.whitelist, WLInput.Text); WLInput.Text = ""; UpdateWLVisuals() end
+end)
+UpdateWLVisuals()
+
+local function ManageTags(p)
+    if p == localPlayer then return end
+    local function apply()
+        local char = p.Character or p.CharacterAdded:Wait()
+        local head = char:WaitForChild("Head", 5)
+        if not head then return end
+        local bb = head:FindFirstChild("OverheadElite") or Instance.new("BillboardGui", head)
+        bb.Name = "OverheadElite"
+        bb.Size = UDim2.new(0, 250, 0, 60)
+        bb.AlwaysOnTop = true
+        bb.StudsOffset = Vector3.new(0, 3, 0)
+        local text = bb:FindFirstChild("MainText") or Instance.new("TextLabel", bb)
+        text.Name = "MainText"
+        text.Size = UDim2.new(1, 0, 1, 0)
+        text.BackgroundTransparency = 1
+        text.TextStrokeTransparency = 0.5
+        text.Font = Enum.Font.GothamBold
+        text.TextSize = 14
+    end
+    p.CharacterAdded:Connect(apply)
+    if p.Character then apply() end
+end
+for _, p in ipairs(Players:GetPlayers()) do ManageTags(p) end
+Players.PlayerAdded:Connect(ManageTags)
+
+local function GetClosestPlayer()
+    local target, dist = nil, math.huge
+    local mouseLoc = UserInputService:GetMouseLocation()
+    
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= localPlayer and isAlive(p) and not isWhitelisted(p) then
+            if IsEnemy(localPlayer, p) then
+                local part = p.Character:FindFirstChild(cfg.aimbot.targetPart)
+                if part and getTargetVisibility(part) then
+                    local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen then
+                        local magnitude = (Vector2.new(pos.X, pos.Y) - mouseLoc).Magnitude
+                        if magnitude < cfg.aimbot.fovRadius and magnitude < dist then
+                            target = p; dist = magnitude
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return target
+end
+
+RunService.RenderStepped:Connect(function()
+    local mouseLoc = UserInputService:GetMouseLocation()
+    FovFrame.Size = UDim2.new(0, cfg.aimbot.fovRadius * 2, 0, cfg.aimbot.fovRadius * 2)
+    FovFrame.Position = UDim2.new(0, mouseLoc.X - cfg.aimbot.fovRadius, 0, mouseLoc.Y - cfg.aimbot.fovRadius)
+
+    if cfg.lighting.fullbright then
+        Lighting.Brightness = 2; Lighting.ClockTime = 14; Lighting.GlobalShadows = false
+    else
+        Lighting.Brightness = originalLightingData.Brightness; Lighting.ClockTime = originalLightingData.ClockTime; Lighting.GlobalShadows = originalLightingData.GlobalShadows
+    end
+    
+    if cfg.lighting.noFog then
+        Lighting.FogEnd = 100000
+        for _, v in pairs(Lighting:GetChildren()) do if v:IsA("Atmosphere") then v.Density = 0 end end
+    else
+        Lighting.FogEnd = originalLightingData.FogEnd
+        for _, v in pairs(Lighting:GetChildren()) do if v:IsA("Atmosphere") then v.Density = originalLightingData.AtmosphereDensity end end
+    end
+
+    lblAim.Text = "AIM: " .. (cfg.aimbot.active and cfg.aimbot.mode:upper() or "OFF")
+    lblAim.TextColor3 = cfg.aimbot.active and (cfg.aimbot.mode == "Legit" and cfg.ui.theme or Color3.fromRGB(255, 50, 50)) or Color3.new(1,0.5,0.5)
+    lblESP.Text = "ESP: " .. (cfg.esp.enabled and "ON" or "OFF")
+    lblESP.TextColor3 = cfg.esp.enabled and cfg.ui.theme or Color3.new(1,0.5,0.5)
+    
+    local m = workspace:FindFirstChild("SCP035_DroppedMask", true)
+    contMask.Visible = cfg.maskEsp.enabled
+    lblMask.Text = "MASK: " .. (m and "DETECTED" or "NONE")
+    lblMask.TextColor3 = m and Color3.new(1,0.7,0) or Color3.new(1,1,1)
+
+    if cfg.teamStats.enabled then
+        local st = "<b><font color='#ffffff'>TEAM COUNTS:</font></b>\n\n"
+        for _, t in ipairs(Teams:GetTeams()) do
+            local hexColor = string.format("#%02X%02X%02X", t.TeamColor.Color.R*255, t.TeamColor.Color.G*255, t.TeamColor.Color.B*255)
+            st = st .. '<font color="' .. hexColor .. '">' .. t.Name .. ": " .. #t:GetPlayers() .. "</font>\n"
+        end
+        lblTeams.Text = st
+        contTeams.Visible = true
+    else
+        contTeams.Visible = false
+    end
+
+    if cfg.aimbot.active and isHoldingAim then
+        if not isAlive(currentTarget) or isWhitelisted(currentTarget) or not IsEnemy(localPlayer, currentTarget) then
+            currentTarget = GetClosestPlayer()
+        end
+        if currentTarget then
+            local part = currentTarget.Character:FindFirstChild(cfg.aimbot.targetPart)
+            if part then
+                if cfg.aimbot.mode == "Legit" then
+                    Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(Camera.CFrame.Position, part.Position), cfg.aimbot.smoothing)
+                elseif cfg.aimbot.mode == "Rage" then
+                    Camera.CFrame = CFrame.new(Camera.CFrame.Position, part.Position)
+                end
+            end
+        end
+    end
+
+    -- === НОВАЯ ЛОГИКА ESP (СОРТИРОВКА ПО ДИСТАНЦИИ) ===
+    local espTargets = {}
+    local myPos = Camera.CFrame.Position
+    if localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        myPos = localPlayer.Character.HumanoidRootPart.Position
+    end
+
+    -- Собираем всех живых игроков и считаем дистанцию до них
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= localPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+            local dist = (p.Character.HumanoidRootPart.Position - myPos).Magnitude
+            table.insert(espTargets, {plr = p, dist = dist})
+        end
+    end
+
+    -- Сортируем: от ближайших к дальним
+    table.sort(espTargets, function(a, b) return a.dist < b.dist end)
+
+    -- Обновляем подсветку
+    for i, data in ipairs(espTargets) do
+        local p = data.plr
+        
+        local high = p.Character:FindFirstChild("Elite_ESP")
+        if not high then
+            high = Instance.new("Highlight")
+            high.Name = "Elite_ESP"
+            high.Parent = p.Character
+        end
+        high.Adornee = p.Character
+        
+        -- Выдаем Highlight только 25 ближайшим игрокам, чтобы не ломать лимит Роблокса
+        if cfg.esp.enabled and i <= cfg.esp.maxHighlights then
+            high.Enabled = true
+        else
+            high.Enabled = false
+        end
+        
+        local isWl = isWhitelisted(p)
+        local isEnm = IsEnemy(localPlayer, p)
+        local isSCP = p.Team and p.Team.Name:lower():find("scp") ~= nil
+        
+        if isWl then 
+            high.FillColor = Color3.new(1,1,1) 
+        else
+            high.FillColor = (p.Team and p.Team.TeamColor.Color) or Color3.new(1,0,0)
+        end
+
+        local head = p.Character:FindFirstChild("Head")
+        if head then
+            local bb = head:FindFirstChild("OverheadElite")
+            if bb then
+                local lbl = bb.MainText
+                local hp = p.Character:FindFirstChild("Humanoid") and math.floor(p.Character.Humanoid.Health) or 0
+                
+                if isWl then
+                    lbl.Text = "[ FRIEND ] " .. p.Name
+                    lbl.TextColor3 = Color3.new(0, 1, 1)
+                    lbl.Visible = cfg.esp.enabled
+                elseif isSCP and hp > 0 then
+                    local scpRole = GetPlayerRole(p)
+                    lbl.Text = scpRole .. " " .. hp .. " HP"
+                    lbl.TextColor3 = Color3.new(1, 0.3, 0.3)
+                    lbl.Visible = cfg.esp.enabled
+                elseif isEnm and hp > 0 then
+                    lbl.Text = "HP: " .. hp
+                    lbl.TextColor3 = Color3.new(1, 0.3, 0.3)
+                    lbl.Visible = cfg.esp.enabled
+                else
+                    lbl.Visible = false
+                end
+            end
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(i, g)
+    if waitingForKey then
+        if i.KeyCode ~= Enum.KeyCode.Unknown then
+            cfg.aimbot.bind = i.KeyCode
+            BindBtn.Text = "  AIM KEY: [" .. i.KeyCode.Name .. "]"
+            BindBtn.TextColor3 = Color3.new(1,1,1)
+            waitingForKey = false
+        end
+        return
+    end
+    if g then return end
+    
+    if i.KeyCode == cfg.ui.openKey then
+        menuVisible = not menuVisible
+        MainFrame.Visible = menuVisible
+    end
+    
+    if i.KeyCode == cfg.aimbot.bind then
+        cfg.aimbot.active = not cfg.aimbot.active
+    end
+    if i.UserInputType == cfg.aimbot.activation then
+        isHoldingAim = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == cfg.aimbot.activation then
+        isHoldingAim = false
+        currentTarget = nil
+    end
+end)
