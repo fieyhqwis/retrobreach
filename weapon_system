@@ -1,0 +1,164 @@
+-- weapon_system.lua
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local WS_ROOT  = ReplicatedStorage:FindFirstChild("WeaponSystem_Overhaul")
+local WS_STATS = WS_ROOT and WS_ROOT:FindFirstChild("WeaponStatistics")
+
+local function looksLikeStats(t)
+    if type(t) ~= "table" then return false end
+    if type(t.FireRate) ~= "number" then return false end
+    if type(t.Damage) ~= "number" then return false end
+    if type(t.Recoil) ~= "table" then return false end
+    return type(t.Spread) == "number" or type(t.WeaponType) == "string"
+end
+
+local StatBackup = {}
+local floor = math.floor
+local clamp = math.clamp
+
+local function deepCopyStats(t)
+    local b = {
+        FireRate           = t.FireRate,
+        Spread             = t.Spread,
+        Damage             = t.Damage,
+        StartDamageDropOff = t.StartDamageDropOff,
+        MaxDamageDropOff   = t.MaxDamageDropOff,
+        ViewPunch          = t.ViewPunch,
+        FireMode           = t.FireMode,
+        BulletsFired       = t.BulletsFired,
+        ReloadAnimSpeed    = t.ReloadAnimSpeed,
+        BurstAmount        = t.BurstAmount,
+    }
+    if type(t.Recoil) == "table" then
+        b.Recoil = {
+            Vertical   = t.Recoil.Vertical,
+            Horizontal = t.Recoil.Horizontal,
+            Damping    = t.Recoil.Damping,
+            Speed      = t.Recoil.Speed,
+            Punch      = t.Recoil.Punch,
+        }
+    end
+    if type(t.DamageMultipliers) == "table" then
+        b.DamageMultipliers = {
+            Head  = t.DamageMultipliers.Head,
+            Other = t.DamageMultipliers.Other,
+        }
+    end
+    return b
+end
+
+local statModules = {}
+local gcPatched   = 0
+
+local function indexStatModules()
+    statModules = {}
+    if not WS_STATS then return 0 end
+    for _, gun in ipairs(WS_STATS:GetChildren()) do
+        local st = gun:FindFirstChild("Stats")
+        if st and st:IsA("ModuleScript") then
+            statModules[#statModules + 1] = { key = gun.Name, mod = st }
+        end
+    end
+    return #statModules
+end
+
+indexStatModules()
+
+local function applyStats(t, key, tg, op)
+    if type(t) ~= "table" then return end
+    local b = StatBackup[key]
+    if not b then b = deepCopyStats(t); StatBackup[key] = b end
+
+    if type(t.Recoil) == "table" and b.Recoil then
+        if tg("RB_NoRecoil") then
+            t.Recoil.Vertical, t.Recoil.Horizontal, t.Recoil.Punch = 0, 0, 0
+        elseif tg("RB_RecoilScale") then
+            local s = op("RB_RecoilPct", 0) / 100
+            t.Recoil.Vertical   = (b.Recoil.Vertical   or 0) * s
+            t.Recoil.Horizontal = (b.Recoil.Horizontal or 0) * s
+            t.Recoil.Punch      = (b.Recoil.Punch      or 0) * s
+        else
+            t.Recoil.Vertical   = b.Recoil.Vertical
+            t.Recoil.Horizontal = b.Recoil.Horizontal
+            t.Recoil.Punch      = b.Recoil.Punch
+        end
+    end
+
+    if type(t.Spread) == "number" or b.Spread ~= nil then
+        t.Spread = tg("RB_NoSpread") and 0 or b.Spread
+    end
+    if b.FireRate ~= nil then
+        t.FireRate = tg("RB_RapidFire") and op("RB_FireRate", 1200) or b.FireRate
+    end
+    if b.FireMode ~= nil then
+        t.FireMode = tg("RB_FullAuto") and "Auto" or b.FireMode
+    end
+    if b.BulletsFired ~= nil then
+        t.BulletsFired = tg("RB_MultiShot") and floor(op("RB_Pellets", 4)) or b.BulletsFired
+    end
+    if b.Damage ~= nil then
+        t.Damage = tg("RB_SuperDamage") and 1e6 or b.Damage
+    end
+    if type(t.DamageMultipliers) == "table" and b.DamageMultipliers then
+        t.DamageMultipliers.Head = tg("RB_HeadMult")
+            and op("RB_HeadMultVal", 10) or b.DamageMultipliers.Head
+    end
+    if b.MaxDamageDropOff ~= nil then
+        if tg("RB_MaxRange") then
+            t.StartDamageDropOff = 10000
+            t.MaxDamageDropOff   = 10000
+        else
+            t.StartDamageDropOff = b.StartDamageDropOff
+            t.MaxDamageDropOff   = b.MaxDamageDropOff
+        end
+    end
+    if b.ViewPunch ~= nil then
+        t.ViewPunch = tg("RB_NoViewPunch") and 0 or b.ViewPunch
+    end
+    if b.ReloadAnimSpeed ~= nil then
+        t.ReloadAnimSpeed = tg("RB_InstReload") and 100 or b.ReloadAnimSpeed
+    end
+end
+
+local function patchModules(tg, op)
+    if not WS_STATS or #statModules == 0 then indexStatModules() end
+    local n = 0
+    for i = 1, #statModules do
+        local e = statModules[i]
+        local ok, cfg = pcall(function() return require(e.mod) end)
+        if ok and looksLikeStats(cfg) then
+            applyStats(cfg, e.key, tg, op)
+            n = n + 1
+        end
+    end
+    return n
+end
+
+local function patchRuntime(tg, op)
+    if type(getgc) ~= "function" then return 0 end
+    local ok, list = pcall(function() return getgc(true) end)
+    if not ok or type(list) ~= "table" then return 0 end
+    local n = 0
+    for i = 1, #list do
+        local v = list[i]
+        if type(v) == "table" and looksLikeStats(v) then
+            local key = ("gc_%s_%s_%s_%s"):format(
+                tostring(v.WeaponType), tostring(v.WeaponCategory),
+                tostring(v.FireRate), tostring(v.Damage))
+            applyStats(v, key, tg, op)
+            n = n + 1
+        end
+    end
+    gcPatched = n
+    return n
+end
+
+return {
+    WS_STATS       = WS_STATS,
+    statModules    = statModules,
+    gcPatched      = function() return gcPatched end,
+    statCount      = function() return #statModules end,
+    patchModules   = patchModules,
+    patchRuntime   = patchRuntime,
+    indexModules   = indexStatModules,
+}
