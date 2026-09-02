@@ -1,0 +1,154 @@
+-- factions.lua
+local FACTION_PATTERNS = {
+    DCLASS = { "dclass", "classd", "classdpersonnel", "dclasspersonnel", "cd" },
+    CHAOS  = { "chaos", "chaosinsurgency", "ci", "insurgency", "insurgent" },
+    MTF    = { "mtf", "mobiletaskforce", "taskforce", "ntf", "ninetailedfox",
+               "epsilon", "epsilon11", "e11", "alpha", "beta" },
+    SEC    = { "security", "securitydepartment", "securitydep", "sd", "guard",
+               "securityofficer", "departmentofsecurity" },
+    FOUND  = { "foundation", "foundationpersonnel", "fp", "facilitypersonnel",
+               "scientist", "researcher", "medical", "medic", "engineer",
+               "facility", "personnel" },
+    SCP    = { "scp", "scps", "anomaly", "anomalies", "scpobject" },
+    SH     = { "serpent", "serpentshand", "serpents", "sh" },
+    GOC    = { "globaloccult", "globaloccultcoalition", "goc", "occult", "coalition" },
+}
+
+local FACTION_GROUP = {
+    DCLASS = 1, CHAOS = 1,
+    MTF    = 2, SEC   = 2, FOUND = 2,
+    SCP    = 3, SH    = 3,
+    GOC    = 4,
+}
+
+local GROUP_COLOR = {
+    [1] = Color3.fromRGB(255, 150,  58),
+    [2] = Color3.fromRGB(120, 170, 255),
+    [3] = Color3.fromRGB(200,  90, 220),
+    [4] = Color3.fromRGB( 90, 220, 200),
+}
+
+local FACTION_LABEL = {
+    DCLASS = "D-Class", CHAOS = "Chaos", MTF = "MTF", SEC = "Security",
+    FOUND = "Foundation", SCP = "SCP", SH = "Serpent's Hand", GOC = "GOC",
+}
+
+local UNKNOWN_COLOR = Color3.fromRGB(235, 235, 235)
+
+local normMemo    = setmetatable({}, { __mode = "kv" })
+local factionMemo = setmetatable({}, { __mode = "kv" })
+
+local function normalize(s)
+    if type(s) ~= "string" then return nil end
+    local m = normMemo[s]
+    if m ~= nil then return m end
+    local t = s:lower():gsub("[^%a]", "")
+    if t == "" then t = nil end
+    normMemo[s] = t
+    return t
+end
+
+local function matchFaction(s)
+    local n = normalize(s)
+    if not n then return nil end
+    local m = factionMemo[n]
+    if m ~= nil then return m end
+    local best, bestLen = nil, 0
+    for faction, list in pairs(FACTION_PATTERNS) do
+        for i = 1, #list do
+            local pat = list[i]
+            if n == pat or n:find(pat, 1, true) then
+                if #pat > bestLen then best, bestLen = faction, #pat end
+            end
+        end
+    end
+    factionMemo[n] = best
+    return best
+end
+
+local function teamNameOf(plr)
+    local nm = nil
+    pcall(function()
+        local t = plr.Team
+        if t then nm = t.Name end
+    end)
+    if not nm or nm == "" then
+        pcall(function()
+            local tc = plr.TeamColor
+            if tc then nm = tc.Name end
+        end)
+    end
+    return nm
+end
+
+local function roleOf(plr)
+    local r = nil
+    pcall(function() r = plr:GetAttribute("Role") end)
+    if type(r) == "string" and r ~= "" then return r end
+    pcall(function() r = plr:GetAttribute("RoleName") end)
+    if type(r) == "string" and r ~= "" then return r end
+    for i = 1, 4 do
+        local key = ({ "Role", "RoleName", "TeamRole", "Class" })[i]
+        local v = plr:FindFirstChild(key)
+        if v and v:IsA("StringValue") and v.Value ~= "" then return v.Value end
+    end
+    local ch = plr.Character
+    if ch then
+        local v = ch:FindFirstChild("Role")
+        if v and v:IsA("StringValue") and v.Value ~= "" then return v.Value end
+    end
+    return nil
+end
+
+local FactionCache = setmetatable({}, { __mode = "k" })
+local clock = os.clock
+
+local function buildFaction(plr)
+    local tn   = teamNameOf(plr)
+    local role = roleOf(plr)
+    local f    = matchFaction(tn) or matchFaction(role)
+    local rec  = FactionCache[plr]
+    if not rec then rec = {}; FactionCache[plr] = rec end
+    rec.faction = f
+    rec.group   = f and FACTION_GROUP[f] or nil
+    rec.team    = f and FACTION_LABEL[f] or (tn or "Unknown")
+    rec.role    = role
+    rec.color   = GROUP_COLOR[rec.group] or UNKNOWN_COLOR
+    rec.t       = clock()
+    return rec
+end
+
+local function recOf(plr)
+    local r = FactionCache[plr]
+    if r and clock() - r.t < 1 then return r end
+    return buildFaction(plr)
+end
+
+return {
+    FactionCache  = FactionCache,
+    FACTION_LABEL = FACTION_LABEL,
+    GROUP_COLOR   = GROUP_COLOR,
+    UNKNOWN_COLOR = UNKNOWN_COLOR,
+    normalize     = normalize,
+    matchFaction  = matchFaction,
+    teamNameOf    = teamNameOf,
+    roleOf        = roleOf,
+    recOf         = recOf,
+    factionOf     = function(plr) return recOf(plr).faction end,
+    groupOf       = function(plr) return recOf(plr).group end,
+    colorOf       = function(plr) return recOf(plr).color end,
+    labelOf       = function(plr)
+        local r = recOf(plr)
+        return r.team, r.role
+    end,
+    isEnemy       = function(plr, LocalPlayer, Settings)
+        if not Settings.TeamCheck then return true end
+        local r = recOf(plr)
+        if r.faction == "GOC" then return true end
+        local mine = recOf(LocalPlayer).faction
+        if mine == "GOC" then return true end
+        if not mine or not r.faction then return Settings.UnknownIsEnemy end
+        local fg = FACTION_GROUP
+        return fg[mine] ~= fg[r.faction]
+    end,
+}
