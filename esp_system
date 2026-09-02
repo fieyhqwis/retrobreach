@@ -1,0 +1,220 @@
+-- esp_system.lua
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local abs   = math.abs
+local floor = math.floor
+local clamp = math.clamp
+local max   = math.max
+local V2    = Vector2.new
+local V3    = Vector3.new
+
+local hasDrawing = false
+do
+    local ok, probe = pcall(function() return Drawing.new("Line") end)
+    if ok and probe then
+        hasDrawing = true
+        pcall(function() probe:Remove() end)
+    end
+end
+
+local function newDraw(class, props)
+    if not hasDrawing then return nil end
+    local ok, obj = pcall(function() return Drawing.new(class) end)
+    if not ok or not obj then return nil end
+    for k, v in pairs(props or {}) do
+        pcall(function() obj[k] = v end)
+    end
+    return obj
+end
+
+local function fmtHp(v)
+    local n = floor(v + 0.5)
+    if n < 0 then n = 0 end
+    if n >= 10000 then return ("%.1fk"):format(n / 1000) end
+    return tostring(n)
+end
+
+local espObjects = {}
+local espKeys    = {}
+
+local function makeESP(plr, LocalPlayer)
+    if plr == LocalPlayer or espObjects[plr] then return end
+    local e = { d = {}, shown = true, tText = 0, hp = -1, lastTxt = "", lastInfo = "", lastHp = "" }
+    if hasDrawing then
+        e.d.box    = newDraw("Square", { Thickness = 1, Filled = false, Visible = false, ZIndex = 2 })
+        e.d.boxOut = newDraw("Square", { Thickness = 3, Filled = false, Visible = false, ZIndex = 1, Color = Color3.new(0,0,0) })
+        e.d.text   = newDraw("Text",   { Size = 13, Center = true, Outline = true, Visible = false, ZIndex = 3 })
+        e.d.info   = newDraw("Text",   { Size = 12, Center = true, Outline = true, Visible = false, ZIndex = 3 })
+        e.d.hpNum  = newDraw("Text",   { Size = 12, Center = false, Outline = true, Visible = false, ZIndex = 3 })
+        e.d.hpBg   = newDraw("Square", { Thickness = 1, Filled = true, Visible = false, ZIndex = 1, Color = Color3.new(0,0,0) })
+        e.d.hpBar  = newDraw("Square", { Thickness = 1, Filled = true, Visible = false, ZIndex = 2 })
+        e.d.tracer = newDraw("Line",   { Thickness = 1, Visible = false, ZIndex = 1 })
+    end
+    espObjects[plr] = e
+    espKeys[#espKeys + 1] = plr
+end
+
+local function clearESP(plr)
+    local e = espObjects[plr]
+    if not e then return end
+    for _, d in pairs(e.d) do pcall(function() d:Remove() end) end
+    if e.highlight then pcall(function() e.highlight:Destroy() end) end
+    espObjects[plr] = nil
+    for i = #espKeys, 1, -1 do
+        if espKeys[i] == plr then table.remove(espKeys, i); break end
+    end
+end
+
+local function hideESP(e)
+    if not e.shown then return end
+    e.shown = false
+    for _, d in pairs(e.d) do d.Visible = false end
+    if e.highlight then e.highlight.Enabled = false end
+end
+
+local function updateESP(plr, e, now, textTick, Camera, Settings, colorOf, labelOf, isEnemy)
+    local char = plr.Character
+    if not Settings.ESP or not char then hideESP(e); return end
+    if Settings.TeamCheckRole and not isEnemy(plr) then hideESP(e); return end
+
+    local hum  = char:FindFirstChildOfClass("Humanoid")
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    if not hum or not hrp or not head or hum.Health <= 0 then hideESP(e); return end
+
+    local camPos = Camera.CFrame.Position
+    local dist = (hrp.Position - camPos).Magnitude
+    if dist > Settings.ESPMaxDist then hideESP(e); return end
+
+    e.shown = true
+
+    if not hasDrawing then
+        if not e.highlight or e.highlight.Parent ~= char then
+            if e.highlight then pcall(function() e.highlight:Destroy() end) end
+            local hl = Instance.new("Highlight")
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.FillTransparency = 0.6
+            hl.OutlineTransparency = 0
+            hl.OutlineColor = Color3.new(1, 1, 1)
+            hl.Parent = char
+            e.highlight = hl
+        end
+        e.highlight.Enabled = true
+        e.highlight.FillColor = colorOf(plr)
+        return
+    end
+
+    local topPos, topOn = Camera:WorldToViewportPoint(head.Position + V3(0, 0.8, 0))
+    if not topOn then hideESP(e); return end
+    local botPos = Camera:WorldToViewportPoint(hrp.Position - V3(0, 3.2, 0))
+
+    local height = abs(botPos.Y - topPos.Y)
+    if height < 2 then hideESP(e); return end
+    local width = height * 0.55
+    local x, y  = topPos.X - width * 0.5, topPos.Y
+    local d      = e.d
+
+    if d.box then
+        d.box.Visible = Settings.ESPBox
+        d.box.Size = V2(width, height)
+        d.box.Position = V2(x, y)
+    end
+    if d.boxOut then
+        d.boxOut.Visible = Settings.ESPBox
+        d.boxOut.Size = V2(width, height)
+        d.boxOut.Position = V2(x, y)
+    end
+
+    if textTick then
+        local col = colorOf(plr)
+        if d.box    then d.box.Color    = col end
+        if d.tracer then d.tracer.Color = col end
+
+        local team, role = labelOf(plr)
+
+        if d.text then
+            local s = ""
+            if Settings.ESPName then s = plr.Name end
+            if Settings.ESPDist then
+                s = (s ~= "" and s .. " " or "") .. ("[%dm]"):format(floor(dist))
+            end
+            d.text.Visible = (s ~= "")
+            if s ~= e.lastTxt then d.text.Text = s; e.lastTxt = s end
+            d.text.Color = col
+        end
+
+        if d.info then
+            local s = ""
+            if Settings.ESPRole then
+                s = team or "Unknown"
+                if role then s = s .. " — " .. role end
+            end
+            d.info.Visible = (s ~= "")
+            if s ~= e.lastInfo then d.info.Text = s; e.lastInfo = s end
+            d.info.Color = col
+        end
+    end
+
+    if d.text and d.text.Visible then d.text.Position = V2(topPos.X, y - 16) end
+    if d.info and d.info.Visible then d.info.Position = V2(topPos.X, y - 30) end
+
+    local style   = Settings.ESPHealthStyle
+    local showBar = (style == "Bar" or style == "Both")
+    local showNum = (style == "Number" or style == "Both")
+    local mx = hum.MaxHealth
+    if not mx or mx <= 0 then mx = hum.Health end
+    local pct = clamp(hum.Health / max(mx, 1), 0, 1)
+
+    if d.hpBg then
+        d.hpBg.Visible = showBar
+        if showBar then
+            d.hpBg.Size = V2(3, height)
+            d.hpBg.Position = V2(x - 6, y)
+        end
+    end
+    if d.hpBar then
+        d.hpBar.Visible = showBar
+        if showBar then
+            local h = height * pct
+            d.hpBar.Size = V2(3, h)
+            d.hpBar.Position = V2(x - 6, y + height - h)
+            if abs(pct - e.hp) > 0.01 then
+                e.hp = pct
+                d.hpBar.Color = Color3.fromRGB(255 - 255 * pct, 255 * pct, 60)
+            end
+        end
+    end
+    if d.hpNum then
+        d.hpNum.Visible = showNum
+        if showNum then
+            local s = fmtHp(hum.Health) .. "/" .. fmtHp(mx)
+            if s ~= e.lastHp then
+                e.lastHp = s
+                d.hpNum.Text = s
+                d.hpNum.Color = Color3.fromRGB(255 - 255 * pct, 255 * pct, 60)
+            end
+            d.hpNum.Position = V2(x + width + 4, y + height * 0.5 - 6)
+        end
+    end
+
+    if d.tracer then
+        d.tracer.Visible = Settings.ESPTracer
+        if Settings.ESPTracer then
+            local vp = Camera.ViewportSize
+            d.tracer.From = V2(vp.X * 0.5, vp.Y)
+            d.tracer.To   = V2(topPos.X, y + height)
+        end
+    end
+end
+
+return {
+    hasDrawing  = hasDrawing,
+    newDraw     = newDraw,
+    espObjects  = espObjects,
+    espKeys     = espKeys,
+    makeESP     = makeESP,
+    clearESP    = clearESP,
+    hideESP     = hideESP,
+    updateESP   = updateESP,
+}
